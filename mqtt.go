@@ -888,6 +888,15 @@ func (c *ClientConn) Publish(m *proto.Publish) {
 	c.out <- job{m: m}
 }
 
+// Publish publishes the given message to the MQTT server.
+// The QosLevel of the message must be QosAtLeastOnce for now.
+func (c *ClientConn) Ping(m *proto.PingReq) {
+	if m.QosLevel != proto.QosAtMostOnce {
+		panic("unsupported QoS level")
+	}
+	c.out <- job{m: m}
+}
+
 // sync sends a message and blocks until it was actually sent.
 func (c *ClientConn) sync(m proto.Message) {
 	j := job{m: m, r: make(receipt)}
