@@ -721,6 +721,7 @@ const clientQueueLength = 100
 // to an MQTT server. It should be allocated via NewClientConn.
 type ClientConn struct {
 	ClientId string              // May be set before the call to Connect.
+	KeepAliveTimer uint16
 	Dump     bool                // When true, dump the messages in and out.
 	Incoming chan *proto.Publish // Incoming messages arrive on this channel.
 	out      chan job
@@ -832,6 +833,7 @@ func (c *ClientConn) Connect(user, pass string) error {
 		ProtocolName:    "MQIsdp",
 		ProtocolVersion: 3,
 		ClientId:        c.ClientId,
+		KeepAliveTimer:  c.KeepAliveTimer,
 		CleanSession:    true,
 	}
 	if user != "" {
