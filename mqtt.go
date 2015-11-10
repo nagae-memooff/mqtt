@@ -785,6 +785,9 @@ func (c *ClientConn) reader() {
 			c.suback <- m
 		case *proto.Disconnect:
 			return
+		case *proto.PingResp:
+			continue
+			// do nothing
 		default:
 			log.Printf("cli reader: got msg type %T", m)
 		}
