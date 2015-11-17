@@ -720,15 +720,15 @@ const clientQueueLength = 100
 // A ClientConn holds all the state associated with a connection
 // to an MQTT server. It should be allocated via NewClientConn.
 type ClientConn struct {
-	ClientId string              // May be set before the call to Connect.
+	ClientId       string // May be set before the call to Connect.
 	KeepAliveTimer uint16
-	Dump     bool                // When true, dump the messages in and out.
-	Incoming chan *proto.Publish // Incoming messages arrive on this channel.
-	out      chan job
-	conn     net.Conn
-	done     chan struct{} // This channel will be readable once a Disconnect has been successfully sent and the connection is closed.
-	connack  chan *proto.ConnAck
-	suback   chan *proto.SubAck
+	Dump           bool                // When true, dump the messages in and out.
+	Incoming       chan *proto.Publish // Incoming messages arrive on this channel.
+	out            chan job
+	conn           net.Conn
+	done           chan struct{} // This channel will be readable once a Disconnect has been successfully sent and the connection is closed.
+	connack        chan *proto.ConnAck
+	suback         chan *proto.SubAck
 }
 
 // NewClientConn allocates a new ClientConn.
@@ -766,6 +766,7 @@ func (c *ClientConn) reader() {
 				return
 			}
 			log.Print("cli reader: ", err)
+			panic(err)
 			return
 		}
 
