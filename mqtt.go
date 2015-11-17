@@ -766,7 +766,6 @@ func (c *ClientConn) reader() {
 				return
 			}
 			log.Print("cli reader: ", err)
-			panic(err)
 			return
 		}
 
