@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
@@ -17,21 +18,30 @@ import (
 	"github.com/nagae-memooff/mqtt"
 )
 
-var conns = flag.Int("conns", 1, "how many conns (0 means infinite)")
-var host = flag.String("host", "192.168.100.236:1884", "hostname of broker")
+var host = flag.String("host", "192.168.100.236:1884", "服务器IP")
+var laddr = flag.String("laddr", "192.168.100.217", "使用这个本地地址建立连接")
 var user = flag.String("user", "server", "user")
 var pass = flag.String("pass", "minxing123", "password")
+var list_file = flag.String("list_file", "channel.list", "读取topic文件名")
 var dump = flag.Bool("dump", false, "dump messages?")
 var wait = flag.Int("wait", 100, "每个客户端建立连接前等待的毫秒数")
 var pace = flag.Int("pace", 1, "每个客户端每发布一条消息时，平均等待的秒数")
-var up_rd = flag.Int("up_rd", 3, "有十分之几的概率是发回执")
-var close_wait = flag.Int("close_wait", 1, "中断测试时，等待mqtt服务器推送完毕的秒数")
+var start_wait = flag.Int("start_wait", 50, "每个客户端发布第一条消息前等待的秒数")
+var t = flag.Bool("t", false, "是否连接特定客户端")
+var ping_only = flag.Bool("ping_only", false, "只ping，不发消息")
+var ssl = flag.Bool("ssl", true, "使用ssl")
+var raddr *net.TCPAddr
+var start_port = flag.Int("start_port", 1024, "本地起始端口")
 
-var feedback_topic = "/u"
+var now_port = uint16(0)
+
+// var publish = flag.Bool("publish", true, "是否发消息")
+var close_wait = flag.Int("close_wait", 5, "中断测试时，等待mqtt服务器推送完毕的秒数")
+
 var broadcast_topic = "/b/272d56f8515874d695f1a1a4db899b38"
 
 // var broadcast_message_temp = `{"clients"}`
-var publish bool = true
+var publish = true
 
 var teding_client_id = "fake_teding_recv"
 var teding_topic = "/u/teding_topic"
@@ -44,13 +54,19 @@ var will_subscribe_count uint64 = 0
 var subscribe_count uint64 = 0
 
 func main() {
-	err := config.Parse("channel.list")
+	flag.Parse()
+
+	fmt.Println(*list_file)
+	err := config.Parse(*list_file)
 	if err != nil {
-		log.Println("load config failed." + err.Error())
+		log.Println("load config failed.\n" + err.Error())
 		os.Exit(1)
 	}
 
-	flag.Parse()
+	raddr, err = net.ResolveTCPAddr("tcp", *host)
+	if err != nil {
+		log.Println(err)
+	}
 
 	//	if flag.NArg() != 2 {
 	//		//     topic = "/u/2cKvvd_6yxOUh-r32p97riP0yew="
@@ -60,10 +76,6 @@ func main() {
 	//		payload = proto.BytesPayload([]byte(flag.Arg(1)))
 	//	}
 
-	if *conns == 0 {
-		*conns = -1
-	}
-
 	go func() {
 		c := make(chan os.Signal)
 		signal.Notify(c)
@@ -71,18 +83,22 @@ func main() {
 		//signal.Notify(c, syscall.SIGHUP, syscall.SIGUSR2)
 
 		//阻塞直至有信号传入
-		s := <-c
-		if s.String() == "interrupt" {
-			publish = false
-			fmt.Printf("等待 %d 秒，看消息能不能发送完毕", *close_wait)
-			time.Sleep((time.Duration)(*close_wait) * time.Second)
-			//       fmt.Printf("send: %d, recv: %d\n", send_count, recv_count)
-			os.Exit(0)
+		for s := range c {
+			if s.String() == "interrupt" {
+				publish = false
+				fmt.Printf("等待 %d 秒，看消息能不能发送完毕\n", *close_wait)
+				time.Sleep((time.Duration)(*close_wait) * time.Second)
+				//       fmt.Printf("send: %d, recv: %d\n", send_count, recv_count)
+				os.Exit(0)
+				panic("中断")
+			}
 		}
 	}()
 	//   i := 0
 
-	go teding_client("fake_teding_recv", "/u/teding_topic")
+	if *t {
+		go teding_client("fake_teding_recv", "/u/teding_topic")
+	}
 	conf := *config.GetModel()
 
 	for client_id, topic := range conf {
@@ -104,24 +120,65 @@ func client(client_id, topic string) {
 	//   log.Print("starting client ", i)
 	defer func() {
 		if err := recover(); err != nil {
-			log.Printf("发生错误啦，重连！！！！！ %s", err)
-			time.Sleep(10 * time.Second)
+			log.Printf("client_id: %s, 发生错误啦，重连！！！！！ %s\n", client_id, err)
+			time.Sleep(5 * time.Second)
 			client(client_id, topic)
 		}
 	}()
 
-	will_subscribe_count++
 	send_count := 0
-	conn, err := net.Dial("tcp", *host)
-	if err != nil {
-		log.Print("dial: ", err)
-		panic(err)
+
+	// First, create the set of root certificates. For this example we only
+	// have one. It's also possible to omit this in order to use the
+	// default root set of the current operating system.
+
+	var conn net.Conn
+
+	if *ssl {
+		now_port++
+		var port uint16 = now_port + uint16(*start_port)
+		laddr_string := fmt.Sprintf("%s:%d", *laddr, port)
+		laddr, err := net.ResolveTCPAddr("tcp", laddr_string)
+		if err != nil {
+			log.Print("addr err:", err)
+			panic(err)
+		}
+		d := &net.Dialer{LocalAddr: laddr}
+
+		conn, err = tls.DialWithDialer(d, "tcp", *host, &tls.Config{
+			//     conn, err = tls.Dial("tcp", *host, &tls.Config{
+			InsecureSkipVerify: true,
+		})
+		if err != nil {
+			panic("failed to connect: " + err.Error())
+		}
+	} else {
+		//     conn, err = net.Dial("tcp", *host)
+		now_port++
+		var port uint16 = now_port + uint16(*start_port)
+		laddr_string := fmt.Sprintf("%s:%d", *laddr, port)
+		laddr, err := net.ResolveTCPAddr("tcp", laddr_string)
+		if err != nil {
+			log.Print("addr err:", err)
+			panic(err)
+		}
+
+		conn, err = net.DialTCP("tcp", laddr, raddr)
+
+		if err != nil {
+			log.Print("dial: ", err)
+			panic(err)
+		}
 	}
+
 	cc := mqtt.NewClientConn(conn)
 	cc.ClientId = client_id
 	cc.KeepAliveTimer = 60
 	cc.Dump = *dump
 
+	will_subscribe_count++
+
+	tmp_id := will_subscribe_count
 	if publish {
 		log.Printf("client %d ：尝试连接到： %s, %s\n", will_subscribe_count, client_id, topic)
 		if err := cc.Connect(*user, *pass); err != nil {
@@ -132,7 +189,7 @@ func client(client_id, topic string) {
 		//   half := int32(*pace / 2)
 
 		_ = cc.Subscribe([]proto.TopicQos{
-			{topic, proto.QosAtMostOnce},
+			{topic, proto.QosAtLeastOnce},
 		})
 		subscribe_count++
 		log.Printf("已连接上： %d\n", subscribe_count)
@@ -144,6 +201,13 @@ func client(client_id, topic string) {
 	}
 
 	go func() {
+		defer func() {
+			if err := recover(); err != nil {
+				log.Printf("ping 出错： %s\n", err)
+				time.Sleep(10 * time.Second)
+			}
+		}()
+
 		for {
 			if publish {
 				cc.Ping(&proto.PingReq{Header: proto.Header{}})
@@ -155,49 +219,52 @@ func client(client_id, topic string) {
 	}()
 
 	go func() {
-		for _ = range cc.Incoming {
-			//     for incom := range cc.Incoming {
-			recv_count++
-			log.Printf("%s 接收消息: %d \n", client_id, recv_count)
-			//       fmt.Println(pub.Payload)
+		defer func() {
+			if err := recover(); err != nil {
+				log.Printf("出错： %s\n", err)
+				time.Sleep(10 * time.Second)
+			}
+		}()
+
+		//     for _ = range cc.Incoming {
+		for incom := range cc.Incoming {
+			time_now := time.Now().UnixNano()
+			fmt.Printf("{payload: %s, now: %d },\n", incom.Payload, time_now)
+			//       recv_count++
+			//       if recv_count%100 == 0 {
+			//         log.Printf("%s 接收消息: %d \n", client_id, recv_count)
+			//       }
+			//       fmt.Printf("%s\n", incom.Payload)
 		}
 	}()
 
-	var feedback_payload = proto.BytesPayload(`53:ewogICJkYXRhIiA6IFsKICAgIHsKICAgICAgImNvbnZlcnNhdGlvbl9pZCIgOiAyMDAyMDE5MCwKICAgICAgIm1lc3NhZ2VfaWQiIDogNzE2LAogICAgICAidXNlcl9pZCIgOiA1MwogICAgfQogIF0sCiAgInR5cGUiIDogInJlY2VpcHQiCn0=`)
-	time.Sleep(50 * time.Second)
+	time.Sleep(time.Duration(*start_wait) * time.Second)
 
-	if will_subscribe_count > 1000 {
+	//   log.Printf("%d 哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈\n", will_subscribe_count)
+	_ = tmp_id
+	if *ping_only {
+		<-make(chan bool)
+	} else if tmp_id < 250 {
+		//   if true {
+		//   if false {
 		for {
 			if publish {
-				//       payload := proto.BytesPayload([]byte(fmt.Sprintf("hello: %s, %d", client_id, send_count)))
-				rd := rand.Int31n(10)
-				if (int)(rd) < *up_rd {
-					cc.Publish(&proto.Publish{
-						Header:    proto.Header{},
-						TopicName: feedback_topic,
-						Payload:   feedback_payload,
-					})
-					log.Printf("%s 发送回执 \n", client_id)
-				} else {
-					//         p := proto.BytesPayload([]byte(fmt.Sprintf("hello: %s, %d", client_id, send_count))))
-					//         message := proto.BytesPayload(base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("hello: %s, %d", client_id, send_count))))
-
-					payload := base64.StdEncoding.EncodeToString(([]byte)(fmt.Sprintf("hello, I'm %s, now message count is %d", client_id, send_count)))
-					message, err := json.Marshal(&BroadCastMessage{Clients: recv_qunliao, Payload: payload})
-					//         fmt.Println((string)(message))
-					if err != nil {
-						log.Printf("marshal failed: %s \n", err)
-					}
-					marshaled_message := proto.BytesPayload(message)
-					//         message_payload := proto.BytesPayload(base64.StdEncoding.EncodeToString(marshaled_message))
-
-					cc.Publish(&proto.Publish{
-						Header:    proto.Header{},
-						TopicName: broadcast_topic,
-						Payload:   marshaled_message,
-					})
-					log.Printf("%s 发送群聊 \n", client_id)
+				//         payload := base64.StdEncoding.EncodeToString(([]byte)(fmt.Sprintf("hello, I'm %s, now message count is %d", client_id, send_count)))
+				payload := base64.StdEncoding.EncodeToString(([]byte)(fmt.Sprintf("%d", time.Now().UnixNano())))
+				message, err := json.Marshal(&BroadCastMessage{Clients: recv_qunliao, Payload: payload})
+				//         fmt.Println((string)(message))
+				if err != nil {
+					log.Printf("marshal failed: %s \n", err)
 				}
+				marshaled_message := proto.BytesPayload(message)
+				//         message_payload := proto.BytesPayload(base64.StdEncoding.EncodeToString(marshaled_message))
+
+				cc.Publish(&proto.Publish{
+					Header:    proto.Header{},
+					TopicName: broadcast_topic,
+					Payload:   marshaled_message,
+				})
+				log.Printf("%s 发送群聊 \n", client_id)
 				send_count++
 				time.Sleep((time.Duration)(rand.Int31n((int32)(*pace))) * time.Second)
 				//     sltime := rand.Int31n(half) - (half / 2) + int32(*pace)
@@ -205,30 +272,20 @@ func client(client_id, topic string) {
 				return
 			}
 		}
-	} else {
+	} else if tmp_id < 8000 {
 		for {
 			if publish {
-				//       payload := proto.BytesPayload([]byte(fmt.Sprintf("hello: %s, %d", client_id, send_count)))
-				rd := rand.Int31n(10)
-				if (int)(rd) < *up_rd {
-					cc.Publish(&proto.Publish{
-						Header:    proto.Header{},
-						TopicName: feedback_topic,
-						Payload:   feedback_payload,
-					})
-					log.Printf("%s 发送回执 \n", client_id)
-				} else {
-					message := base64.StdEncoding.EncodeToString(([]byte)(fmt.Sprintf("hello, I'm %s, now message count is %d", client_id, send_count)))
-					payload := proto.BytesPayload(message)
-					//         message_payload := proto.BytesPayload(base64.StdEncoding.EncodeToString(marshaled_message))
+				//         payload := proto.BytesPayload(fmt.Sprintf("hello, I'm %s, now message count is %d", client_id, send_count))
+				payload := proto.BytesPayload(fmt.Sprintf("%d", time.Now().UnixNano()))
+				//         payload := base64.StdEncoding.EncodeToString(([]byte)(fmt.Sprintf("%d", time.Now().UnixNano())))
+				//         message_payload := proto.BytesPayload(base64.StdEncoding.EncodeToString(marshaled_message))
 
-					cc.Publish(&proto.Publish{
-						Header:    proto.Header{},
-						TopicName: topic,
-						Payload:   payload,
-					})
-					log.Printf("%s 发送私聊 \n", client_id)
-				}
+				cc.Publish(&proto.Publish{
+					Header:    proto.Header{},
+					TopicName: topic,
+					Payload:   payload,
+				})
+				log.Printf("%s 发送私聊 \n", client_id)
 				send_count++
 				time.Sleep((time.Duration)(rand.Int31n((int32)(*pace))) * time.Second)
 				//     sltime := rand.Int31n(half) - (half / 2) + int32(*pace)
@@ -243,25 +300,39 @@ func teding_client(client_id, topic string) {
 	//   log.Print("starting client ", i)
 	defer func() {
 		if err := recover(); err != nil {
-			log.Printf("发生错误啦，重连！！！！！ %s", err)
+			log.Printf("发生错误啦，重连！！！！！ %s\n", err)
 			time.Sleep(10 * time.Second)
 			client(client_id, topic)
 		}
 	}()
 
 	will_subscribe_count++
-	conn, err := net.Dial("tcp", *host)
-	if err != nil {
-		log.Print("dial: ", err)
-		panic(err)
+
+	var conn net.Conn
+	var err error
+
+	if *ssl {
+		conn, err = tls.Dial("tcp", *host, &tls.Config{
+			InsecureSkipVerify: true,
+		})
+		if err != nil {
+			panic("failed to connect: " + err.Error())
+		}
+	} else {
+		conn, err = net.Dial("tcp", *host)
+		if err != nil {
+			log.Print("dial: ", err)
+			panic(err)
+		}
 	}
+
 	cc := mqtt.NewClientConn(conn)
-	cc.ClientId = client_id
+	cc.ClientId = "master_8859"
 	cc.KeepAliveTimer = 60
 	cc.Dump = *dump
 
 	if publish {
-		log.Printf("teding_client %s ：尝试连接到：%s\n", client_id, topic)
+		log.Printf("teding_client %s ：尝试连接到：%s\n", "master_8859", topic)
 		if err := cc.Connect(*user, *pass); err != nil {
 			log.Fatalf("connect: %v\n", err)
 			os.Exit(1)
@@ -270,7 +341,7 @@ func teding_client(client_id, topic string) {
 		//   half := int32(*pace / 2)
 
 		_ = cc.Subscribe([]proto.TopicQos{
-			{topic, proto.QosAtMostOnce},
+			{topic, proto.QosAtLeastOnce},
 		})
 		subscribe_count++
 		log.Printf("已连接上： %d\n", subscribe_count)
@@ -282,6 +353,13 @@ func teding_client(client_id, topic string) {
 	}
 
 	go func() {
+		defer func() {
+			if err := recover(); err != nil {
+				log.Printf("ping 出错： %s\n", err)
+				time.Sleep(10 * time.Second)
+			}
+		}()
+
 		for {
 			if publish {
 				cc.Ping(&proto.PingReq{Header: proto.Header{}})
@@ -304,6 +382,7 @@ func teding_client(client_id, topic string) {
 
 	for {
 		if publish {
+			//     if false {
 			var send_topic string
 			var payload proto.Payload
 
@@ -357,8 +436,8 @@ func teding_client(client_id, topic string) {
 				Payload:   payload,
 			})
 
-			time.Sleep(1 * time.Second)
 			//     sltime := rand.Int31n(half) - (half / 2) + int32(*pace)
+			time.Sleep(30 * time.Second)
 		} else {
 			return
 		}
