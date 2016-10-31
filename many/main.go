@@ -55,6 +55,9 @@ var recv_count uint64 = 0
 var will_subscribe_count uint64 = 0
 var subscribe_count uint64 = 0
 
+// var start_wait_time = time.Duration(*start_wait) * time.Second
+// var pace_time = (time.Duration)(*pace) * time.Second
+
 func main() {
 	flag.Parse()
 
@@ -103,6 +106,7 @@ func main() {
 	}
 	conf := *config.GetModel()
 
+	sleep_time := time.Duration(*wait) * time.Millisecond
 	for client_id, topic := range conf {
 		go client(client_id, topic)
 		//     i++
@@ -111,11 +115,11 @@ func main() {
 		//     if *conns == 0 {
 		//       break
 		//     }
-		time.Sleep(time.Duration(*wait) * time.Millisecond)
+		time.Sleep(sleep_time)
 	}
 
 	// sleep forever
-	<-make(chan struct{})
+	<-make(chan bool)
 }
 
 func client(client_id, topic string) {
@@ -220,7 +224,7 @@ func client(client_id, topic string) {
 		for {
 			if publish {
 				cc.Ping(&proto.PingReq{Header: proto.Header{}})
-				time.Sleep(1 * time.Minute)
+				time.Sleep(time.Minute)
 			} else {
 				return
 			}
@@ -372,7 +376,7 @@ func teding_client(client_id, topic string) {
 		for {
 			if publish {
 				cc.Ping(&proto.PingReq{Header: proto.Header{}})
-				time.Sleep(1 * time.Minute)
+				time.Sleep(time.Minute)
 			} else {
 				return
 			}
