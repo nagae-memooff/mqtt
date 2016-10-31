@@ -7,7 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"math/rand"
+	//   "math/rand"
 	"net"
 	"os"
 	"os/signal"
@@ -25,9 +25,11 @@ var pass = flag.String("pass", "minxing123", "password")
 var list_file = flag.String("list_file", "channel.list", "读取topic文件名")
 var dump = flag.Bool("dump", false, "dump messages?")
 var wait = flag.Int("wait", 100, "每个客户端建立连接前等待的毫秒数")
+var reconnect_after = flag.Int("reconnect_after", -1, "每个客户端在多少秒之后自杀。自杀后，会重新建立连接。若小于等于0,则不自杀。")
 var pace = flag.Int("pace", 1, "每个客户端每发布一条消息时，平均等待的秒数")
 var start_wait = flag.Int("start_wait", 50, "每个客户端发布第一条消息前等待的秒数")
-var t = flag.Bool("t", false, "是否连接特定客户端")
+var t = flag.Bool("t", false, "是否连接特定master客户端")
+var tpace = flag.Int("tpace", 200, "特定master客户端每隔多少毫秒发送一条消息")
 var ping_only = flag.Bool("ping_only", false, "只ping，不发消息")
 var ssl = flag.Bool("ssl", true, "使用ssl")
 var raddr *net.TCPAddr
@@ -97,7 +99,7 @@ func main() {
 	//   i := 0
 
 	if *t {
-		go teding_client("fake_teding_recv", "/u/teding_topic")
+		go teding_client("master_8859", "/u/teding_topic")
 	}
 	conf := *config.GetModel()
 
@@ -177,6 +179,13 @@ func client(client_id, topic string) {
 	cc.Dump = *dump
 
 	will_subscribe_count++
+
+	if *reconnect_after > 0 {
+		go func(conn net.Conn) {
+			time.Sleep(time.Duration(*reconnect_after) * time.Second)
+			conn.Close()
+		}(conn)
+	}
 
 	tmp_id := will_subscribe_count
 	if publish {
@@ -266,7 +275,7 @@ func client(client_id, topic string) {
 				})
 				log.Printf("%s 发送群聊 \n", client_id)
 				send_count++
-				time.Sleep((time.Duration)(rand.Int31n((int32)(*pace))) * time.Second)
+				time.Sleep((time.Duration)(*pace) * time.Second)
 				//     sltime := rand.Int31n(half) - (half / 2) + int32(*pace)
 			} else {
 				return
@@ -287,7 +296,7 @@ func client(client_id, topic string) {
 				})
 				log.Printf("%s 发送私聊 \n", client_id)
 				send_count++
-				time.Sleep((time.Duration)(rand.Int31n((int32)(*pace))) * time.Second)
+				time.Sleep((time.Duration)(*pace) * time.Second)
 				//     sltime := rand.Int31n(half) - (half / 2) + int32(*pace)
 			} else {
 				return
@@ -327,12 +336,12 @@ func teding_client(client_id, topic string) {
 	}
 
 	cc := mqtt.NewClientConn(conn)
-	cc.ClientId = "master_8859"
+	cc.ClientId = client_id
 	cc.KeepAliveTimer = 60
 	cc.Dump = *dump
 
 	if publish {
-		log.Printf("teding_client %s ：尝试连接到：%s\n", "master_8859", topic)
+		log.Printf("teding_client %s ：尝试连接到：%s\n", client_id, topic)
 		if err := cc.Connect(*user, *pass); err != nil {
 			log.Fatalf("connect: %v\n", err)
 			os.Exit(1)
@@ -386,7 +395,8 @@ func teding_client(client_id, topic string) {
 			var send_topic string
 			var payload proto.Payload
 
-			r := rand.Int31n(5)
+			//       r := rand.Int31n(5)
+			r := 4
 			switch r {
 			case 0:
 				send_topic = topic
@@ -437,7 +447,7 @@ func teding_client(client_id, topic string) {
 			})
 
 			//     sltime := rand.Int31n(half) - (half / 2) + int32(*pace)
-			time.Sleep(30 * time.Second)
+			time.Sleep((time.Duration)(*tpace) * time.Millisecond)
 		} else {
 			return
 		}
